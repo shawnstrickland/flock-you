@@ -4,3 +4,10 @@
 .vscode/
 
 .DS_Store
+
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+api/data/
+api/exports/
