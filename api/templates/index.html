@@ -1941,6 +1941,12 @@
                 });
         }
 
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(String(str)));
+            return div.innerHTML;
+        }
+
         function renderDetections(detectionsToRender = detections) {
             const container = document.getElementById('detectionsList');
             
@@ -1997,7 +2003,7 @@
                         <div class="detection-header">
                             <div class="detection-header-left">
                                 <div class="detection-type-badge">
-                                    <span class="detection-type">${detection.detection_method ? detection.detection_method.toUpperCase() : 'UNKNOWN'}</span>
+                                    <span class="detection-type">${detection.detection_method ? escapeHtml(detection.detection_method.toUpperCase()) : 'UNKNOWN'}</span>
                                     <span class="detection-count">${count}×</span>
                                     ${detection.gps && detection.gps.latitude !== undefined ? '<span class="gps-tag">GPS</span>' : ''}
                                 </div>
@@ -2009,8 +2015,8 @@
                             ${detailsHtml}
                             <div class="detail-item">
                                 <span class="detail-label">Alias:</span>
-                                <span class="alias-display" onclick="editAlias(${detection.id})">
-                                    ${detection.alias || '<em>Click to add alias</em>'}
+                                <span class="alias-display" onclick="editAlias(${parseInt(detection.id, 10)})">
+                                    ${detection.alias ? escapeHtml(detection.alias) : '<em>Click to add alias</em>'}
                                 </span>
                             </div>
                         </div>
@@ -2450,52 +2456,39 @@
 
 
 
-        socket.on('flock_reconnected', function(data) {
-            updateFlockStatus(true);
-            document.getElementById('connectFlockBtn').style.display = 'none';
-            document.getElementById('disconnectFlockBtn').style.display = 'inline-block';
-            addSerialLine(`Sniffer device reconnected on ${data.port}`, 'success');
-        });
-
-        socket.on('gps_reconnected', function(data) {
-            updateGpsStatus(true);
-            document.getElementById('connectGpsBtn').style.display = 'none';
-            document.getElementById('disconnectGpsBtn').style.display = 'inline-block';
-            addSerialLine(`GPS device reconnected on ${data.port}`, 'success');
-        });
-
-        socket.on('reconnect_failed', function(data) {
-            const device = data.device === 'flock' ? 'Sniffer' : 'GPS';
-            addSerialLine(`${device} reconnection failed after ${max_reconnect_attempts} attempts`, 'error');
-        });
 
         // Alias editing functions
         function editAlias(detectionId) {
             const aliasDisplay = event.target;
-            const currentAlias = aliasDisplay.textContent.replace('<em>Click to add alias</em>', '').trim();
-            
+            const currentAlias = aliasDisplay.textContent.replace('Click to add alias', '').trim();
+
             const input = document.createElement('input');
             input.type = 'text';
             input.className = 'alias-input';
             input.value = currentAlias;
             input.placeholder = 'Enter alias...';
-            
+
+            let saved = false;
             input.addEventListener('blur', function() {
-                saveAlias(detectionId, input.value);
-            });
-            
-            input.addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') {
-                    saveAlias(detectionId, input.value);
+                if (!saved) {
+                    saved = true;
+                    saveAlias(detectionId, input.value, aliasDisplay);
                 }
             });
-            
+
+            input.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    saved = true;
+                    saveAlias(detectionId, input.value, aliasDisplay);
+                }
+            });
+
             aliasDisplay.innerHTML = '';
             aliasDisplay.appendChild(input);
             input.focus();
         }
 
-        function saveAlias(detectionId, alias) {
+        function saveAlias(detectionId, alias, aliasDisplay) {
             fetch('/api/detection/alias', {
                 method: 'POST',
                 headers: {
@@ -2509,13 +2502,14 @@
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
-                    // Update the display
-                    const aliasDisplay = event.target.parentElement;
-                    aliasDisplay.innerHTML = alias || '<em>Click to add alias</em>';
+                    aliasDisplay.innerHTML = alias ? escapeHtml(alias) : '<em>Click to add alias</em>';
+                } else {
+                    aliasDisplay.innerHTML = aliasDisplay.dataset.prevAlias || '<em>Click to add alias</em>';
                 }
             })
             .catch(error => {
                 console.error('Error saving alias:', error);
+                aliasDisplay.innerHTML = aliasDisplay.dataset.prevAlias || '<em>Click to add alias</em>';
             });
         }
 

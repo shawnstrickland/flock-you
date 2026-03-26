@@ -36,6 +36,8 @@ reconnect_attempts = {'flock': 0, 'gps': 0}
 max_reconnect_attempts = 5
 reconnect_delay = 3  # seconds
 connection_lock = threading.Lock()
+detections_lock = threading.Lock()
+gps_history_lock = threading.Lock()
 serial_queue = queue.Queue()
 next_detection_id = 1  # Unique ID counter
 settings = {'gps_port': '', 'flock_port': '', 'filter': 'all'}
@@ -225,11 +227,11 @@ def gps_reader():
                         if parsed.get('fix_quality') > 0:
                             gps_entry = parsed.copy()
                             gps_entry['system_timestamp'] = time.time()
-                            gps_history.append(gps_entry)
-                            
-                            # Keep only recent GPS readings
-                            if len(gps_history) > MAX_GPS_HISTORY:
-                                gps_history.pop(0)
+                            with gps_history_lock:
+                                gps_history.append(gps_entry)
+                                # Keep only recent GPS readings
+                                if len(gps_history) > MAX_GPS_HISTORY:
+                                    gps_history.pop(0)
                         
                         safe_socket_emit('gps_update', parsed)
                         
@@ -322,8 +324,11 @@ def find_best_gps_match(detection_timestamp):
         
         best_match = None
         min_time_diff = float('inf')
-        
-        for gps_entry in gps_history:
+
+        with gps_history_lock:
+            history_snapshot = list(gps_history)
+
+        for gps_entry in history_snapshot:
             gps_time = gps_entry['system_timestamp']
             time_diff = abs(detection_time - gps_time)
             
@@ -441,58 +446,61 @@ def add_detection_from_serial(data):
     
     # Check if we already have a detection for this MAC address
     mac_address = data.get('mac_address')
-    existing_detection = None
-    
-    if mac_address:
-        for detection in detections:
-            if detection.get('mac_address') == mac_address:
-                existing_detection = detection
-                break
-    
+
+    with detections_lock:
+        existing_detection = None
+
+        if mac_address:
+            for detection in detections:
+                if detection.get('mac_address') == mac_address:
+                    existing_detection = detection
+                    break
+
+        if existing_detection:
+            # Update existing detection with new data and increment count
+            existing_detection['detection_count'] = existing_detection.get('detection_count', 1) + 1
+            existing_detection['last_seen'] = datetime.now().isoformat()
+            existing_detection['last_rssi'] = data.get('rssi', existing_detection.get('last_rssi'))
+            existing_detection['last_channel'] = data.get('channel', existing_detection.get('last_channel'))
+            existing_detection['last_frequency'] = data.get('frequency', existing_detection.get('last_frequency'))
+            existing_detection['last_ssid'] = data.get('ssid', existing_detection.get('last_ssid'))
+            existing_detection['last_device_name'] = data.get('device_name', existing_detection.get('last_device_name'))
+
+            # Preserve detection_method if not already set
+            if not existing_detection.get('detection_method') and data.get('detection_method'):
+                existing_detection['detection_method'] = data.get('detection_method')
+
+            # Update GPS if new data is available
+            if data.get('gps'):
+                existing_detection['gps'] = data['gps']
+
+            # Update cumulative detections
+            for cum_detection in cumulative_detections:
+                if cum_detection.get('mac_address') == mac_address:
+                    cum_detection.update(existing_detection)
+                    break
+            emit_data = dict(existing_detection)
+        else:
+            # Create new detection
+            data['id'] = next_detection_id
+            next_detection_id += 1
+            data['alias'] = ''  # Empty alias by default
+            data['detection_count'] = 1
+            data['first_seen'] = datetime.now().isoformat()
+            data['last_seen'] = datetime.now().isoformat()
+
+            detections.append(data)
+
+            # Add to cumulative detections
+            cumulative_detections.append(data.copy())
+            emit_data = None
+
+    # Save and emit outside the lock to avoid holding it during I/O
+    save_cumulative_detections()
     if existing_detection:
-        # Update existing detection with new data and increment count
-        existing_detection['detection_count'] = existing_detection.get('detection_count', 1) + 1
-        existing_detection['last_seen'] = datetime.now().isoformat()
-        existing_detection['last_rssi'] = data.get('rssi', existing_detection.get('last_rssi'))
-        existing_detection['last_channel'] = data.get('channel', existing_detection.get('last_channel'))
-        existing_detection['last_frequency'] = data.get('frequency', existing_detection.get('last_frequency'))
-        existing_detection['last_ssid'] = data.get('ssid', existing_detection.get('last_ssid'))
-        existing_detection['last_device_name'] = data.get('device_name', existing_detection.get('last_device_name'))
-        
-        # Preserve detection_method if not already set
-        if not existing_detection.get('detection_method') and data.get('detection_method'):
-            existing_detection['detection_method'] = data.get('detection_method')
-        
-        # Update GPS if new data is available
-        if data.get('gps'):
-            existing_detection['gps'] = data['gps']
-        
-        # Update cumulative detections
-        for cum_detection in cumulative_detections:
-            if cum_detection.get('mac_address') == mac_address:
-                cum_detection.update(existing_detection)
-                break
-        save_cumulative_detections()
-        
-        # Emit updated detection
-        safe_socket_emit('detection_updated', existing_detection)
-        print(f"Updated detection: MAC {mac_address}, Count: {existing_detection['detection_count']}, Method: {existing_detection.get('detection_method')}")
+        safe_socket_emit('detection_updated', emit_data)
+        print(f"Updated detection: MAC {mac_address}, Count: {emit_data['detection_count']}, Method: {emit_data.get('detection_method')}")
     else:
-        # Create new detection
-        data['id'] = next_detection_id
-        next_detection_id += 1
-        data['alias'] = ''  # Empty alias by default
-        data['detection_count'] = 1
-        data['first_seen'] = datetime.now().isoformat()
-        data['last_seen'] = datetime.now().isoformat()
-        
-        detections.append(data)
-        
-        # Add to cumulative detections
-        cumulative_detections.append(data.copy())
-        save_cumulative_detections()
-        
-        # Emit to connected clients
         safe_socket_emit('new_detection', data)
         print(f"New detection added: ID {data['id']}, Method: {data.get('detection_method')}, MAC: {mac_address}")
 
@@ -562,8 +570,8 @@ def attempt_reconnect_flock():
                     if flock_serial_connection:
                         try:
                             flock_serial_connection.close()
-                        except:
-                            pass
+                        except Exception as close_err:
+                            print(f"Error closing serial connection: {close_err}")
                     
                     # Wait a moment for the device to be ready
                     time.sleep(1)
